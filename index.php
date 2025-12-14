@@ -1,246 +1,686 @@
 <?php
-// Start session
 session_start();
+include '../../conn.php';   // update path if needed
 
-// Connect to Database
-include 'conn.php';
+// 1. SESSION PROTECTION
+if (!isset($_SESSION['email']) || $_SESSION['role'] !== 'patient') {
+    header("Location: ../login.php");
+    exit();
+}
 
-// Fetch Featured Doctors (Limit 3)
-$doctorsQuery = "
-    SELECT u.full_name, d.specialization, d.doctor_id, AVG(r.rating) as avg_rating, COUNT(r.rating_id) as review_count 
+$email = $_SESSION['email'];
+
+// --- Default Data for Non-Existent Patient Profile ---
+$patient = [
+    'patient_id' => 'N/A',
+    'date_of_birth' => 'N/A',
+    'gender' => 'N/A',
+    'phone' => 'N/A',
+    'address' => 'N/A',
+    'name' => 'User Profile Not Found' // Default name if join fails
+];
+$patient_id = null; // Initialize as null
+
+// 2. FETCH PATIENT BASIC PROFILE (Using LEFT JOIN)
+// Use LEFT JOIN to ensure user data (name/email) is returned even if the patient record is missing.
+$patientQuery = $con->prepare("
+    SELECT u.user_id, u.full_name AS name,
+           p.patient_id, p.date_of_birth, p.gender, p.phone, p.address
     FROM users u 
-    JOIN doctors d ON u.user_id = d.doctor_id 
-    LEFT JOIN reviews r ON d.doctor_id = r.doctor_id 
-    WHERE u.role = 'doctor' 
-    GROUP BY d.doctor_id 
-    ORDER BY avg_rating DESC 
-    LIMIT 3
-";
-$doctorsResult = $con->query($doctorsQuery);
+    LEFT JOIN patients p ON u.user_id = p.patient_id
+    WHERE u.email = ? AND u.role = 'patient'
+");
+$patientQuery->bind_param("s", $email);
+$patientQuery->execute();
+$patientResult = $patientQuery->get_result();
+$fetchedPatient = $patientResult->fetch_assoc();
 
-// Fetch Specialties for Dropdown
-$specialtiesQuery = "SELECT DISTINCT specialization FROM doctors ORDER BY specialization ASC";
-$specialtiesResult = $con->query($specialtiesQuery);
+if ($fetchedPatient) {
+    // Overwrite defaults with fetched data
+    $patient = array_merge($patient, $fetchedPatient);
+    $patient_id = $patient['user_id']; // Use user_id as the primary identifier if patient_id is NULL
+} else {
+    // If user record itself isn't found, stop execution (shouldn't happen with session check)
+    die("User not found or role mismatch.");
+}
+
+// Check if the patient_id (from the 'patients' table) is available
+if ($patient['patient_id'] === null) {
+    // If the patient record doesn't exist, use the user_id for lookups
+    $patient_id = $patient['user_id'];
+    $patient['patient_id'] = $patient_id; // Display the user ID instead
+    $patient['name'] .= '';
+}
+
+// 3. FETCH APPOINTMENTS LIST FOR THIS PATIENT
+$appointments = null;
+if ($patient_id !== 'N/A') {
+    $apptQuery = $con->prepare("SELECT a.appointment_id, a.doctor_id, a.appointment_date, a.status, a.mode, a.created_at,
+               u.full_name AS doctor_name -- Corrected column reference to u.full_name
+        FROM appointments a
+        JOIN users u ON a.doctor_id = u.user_id
+        WHERE a.patient_id = ?
+        ORDER BY 
+            CASE 
+                WHEN a.status = 'Completed' THEN 1 
+                ELSE 0 
+            END ASC,
+            a.appointment_date ASC LIMIT 3");
+    // Change 'i' (integer) to 's' (string/varchar) for $patient_id
+    $apptQuery->bind_param("s", $patient_id);
+    $apptQuery->execute();
+    $appointments = $apptQuery->get_result();
+}
+
+// 4. FETCH PRESCRIPTIONS LIST
+$prescriptions = null;
+if ($patient_id !== 'N/A') {
+    $presQuery = $con->prepare("
+        SELECT pr.prescription_id, pr.appointment_id, pr.doctor_id, pr.notes, pr.created_at,
+               u.full_name AS doctor_name -- Corrected column reference to u.full_name
+        FROM prescriptions pr
+        LEFT JOIN users u ON pr.doctor_id = u.user_id
+        WHERE pr.patient_id = ?
+        ORDER BY pr.created_at DESC LIMIT 3
+    ");
+    // Change 'i' (integer) to 's' (string/varchar) for $patient_id
+    $presQuery->bind_param("s", $patient_id);
+    $presQuery->execute();
+    $prescriptions = $presQuery->get_result();
+}
+
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediLink - Find the Right Doctor</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
+<meta charset="UTF-8">
+<title>Patient Profile</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+ <style>
         /* --- CSS Variables & Reset --- */
         :root {
             --primary-blue: #3b82f6; /* Matching the blue in the image */
-            /* ... (rest of the CSS variables) ... */
             --primary-blue-hover: #2563eb;
             --text-dark: #1f2937;
             --text-muted: #6b7280;
             --bg-light: #f9fafb;
             --bg-white: #ffffff;
             --border-color: #e5e7eb;
-            --star-yellow: #fbbf24;
+            --radius-sm: 4px;
             --radius-md: 8px;
             --radius-lg: 12px;
             --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --success-green: #22c55e;
+            --active-blue: #3b82f6;
+            --download-green-bg: #dcfce7;
         }
 
-        /* [Existing CSS Styles] */
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--text-dark); line-height: 1.5; background-color: var(--bg-white); }
-        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
-        .text-center { text-align: center; }
-        .text-muted { color: var(--text-muted); }
-        .btn { display: inline-block; padding: 10px 24px; font-weight: 600; border-radius: var(--radius-md); text-decoration: none; transition: background-color 0.2s; border: none; cursor: pointer; font-size: 14px; }
-        .btn-primary { background-color: var(--primary-blue); color: white; }
-        .btn-primary:hover { background-color: var(--primary-blue-hover); }
-        .btn-block { display: block; width: 100%; text-align: center; }
-        header { padding: 20px 0; background: white; }
-        .nav-container { display: flex; justify-content: space-between; align-items: center; }
-        .logo { font-weight: 700; font-size: 20px; display: flex; align-items: center; gap: 8px; color: var(--text-dark); }
-        .logo i { color: var(--primary-blue); font-size: 24px; }
-        nav { display: flex; align-items: center; gap: 24px; }
-        .login-link { text-decoration: none; color: var(--text-dark); font-weight: 600; font-size: 14px; }
-        .hero-section { padding: 60px 0; }
-        .hero-container { display: flex; align-items: center; gap: 40px; }
-        .hero-content { flex: 1; }
-        .hero-content h1 { font-size: 48px; font-weight: 800; line-height: 1.2; margin-bottom: 20px; }
-        .hero-content p { font-size: 18px; color: var(--text-muted); margin-bottom: 40px; max-width: 480px; }
-        .hero-image { flex: 1; }
-        .hero-image img { width: 100%; height: auto; border-radius: var(--radius-lg); object-fit: cover; box-shadow: var(--shadow-sm); }
-        .search-widget { background: var(--bg-white); padding: 24px; border-radius: var(--radius-lg); box-shadow: var(--shadow-md); border: 1px solid var(--border-color); }
-        .search-inputs-row { display: flex; gap: 16px; margin-bottom: 20px; }
-        .input-group { flex: 1; display: flex; flex-direction: column; gap: 8px; }
-        .input-group label { font-size: 14px; font-weight: 600; color: var(--text-dark); }
-        .input-wrapper { position: relative; }
-        .input-wrapper input, .input-wrapper select { width: 100%; padding: 12px 16px; border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 14px; color: var(--text-dark); background: white; appearance: none; }
-        .select-wrapper { position: relative; }
-        .select-wrapper::after { content: '\f078'; font-family: 'Font Awesome 6 Free'; font-weight: 900; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; font-size: 12px; }
-        .icon-left i { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
-        .icon-left input { padding-left: 40px; }
-        .icon-right i { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
-        .icon-right input { padding-right: 40px; }
-        .section-bg-light { background-color: var(--bg-light); padding: 80px 0; }
-        .features-grid { display: flex; gap: 30px; }
-        .feature-card { flex: 1; background: var(--bg-white); padding: 32px; border-radius: var(--radius-lg); text-align: center; box-shadow: var(--shadow-sm); border: 1px solid var(--border-color); }
-        .icon-circle { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 24px; }
-        .icon-blue { background-color: #dbeafe; color: var(--primary-blue); }
-        .icon-green { background-color: #d1fae5; color: #10b981; }
-        .icon-purple { background-color: #ede9fe; color: #8b5cf6; }
-        .feature-card h3 { font-size: 18px; margin-bottom: 12px; }
-        .feature-card p { font-size: 14px; color: var(--text-muted); line-height: 1.6; }
-        .doctors-section { padding: 80px 0; }
-        .section-header { margin-bottom: 50px; }
-        .section-header h2 { font-size: 30px; font-weight: 800; margin-bottom: 12px; }
-        .doctors-grid { display: flex; gap: 30px; }
-        .doctor-card { flex: 1; background: var(--bg-white); padding: 24px; border-radius: var(--radius-lg); text-align: center; box-shadow: var(--shadow-sm); border: 1px solid var(--border-color); }
-        .doctor-avatar { width: 100px; height: 100px; border-radius: 50%; object-fit: cover; margin-bottom: 16px; }
-        .doctor-card h3 { font-size: 18px; margin-bottom: 4px; }
-        .doctor-specialty { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; }
-        .rating { display: flex; align-items: center; justify-content: center; gap: 4px; margin-bottom: 20px; font-size: 14px; }
-        .rating i { color: var(--star-yellow); }
-        .rating span { color: var(--text-muted); margin-left: 4px; }
-        @media (max-width: 992px) { .hero-container { flex-direction: column; } .hero-image { width: 100%; } .hero-content { width: 100%; } .hero-content h1 { font-size: 36px; } }
-        @media (max-width: 768px) { .search-inputs-row, .features-grid, .doctors-grid { flex-direction: column; } .nav-container { flex-wrap: wrap; } nav { margin-top: 16px; width: 100%; justify-content: flex-end; } }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: var(--text-dark);
+            line-height: 1.5;
+            background-color: var(--bg-light);
+            min-height: 100vh;
+        }
+
+        /* --- Utilities --- */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 20px;
+            font-weight: 600;
+            border-radius: var(--radius-md);
+            text-decoration: none;
+            transition: background-color 0.2s, border-color 0.2s;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-blue);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--primary-blue-hover);
+        }
+
+        .btn-outline-primary {
+            background-color: transparent;
+            color: var(--primary-blue);
+            border: 1px solid var(--primary-blue);
+        }
+
+        .btn-outline-primary:hover {
+            background-color: var(--primary-blue);
+            color: white;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-completed {
+            background-color: #dcfce7;
+            color: var(--success-green);
+        }
+
+        .status-active {
+            background-color: #dbeafe;
+            color: var(--active-blue);
+        }
+
+        /* --- Header & Nav --- */
+        header {
+            padding: 15px 0;
+            background: white;
+            border-bottom: 1px solid var(--border-color);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-weight: 700;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-dark);
+        }
+
+        .logo i {
+            color: var(--primary-blue);
+            font-size: 24px;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 30px;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+            color: var(--text-dark);
+            font-weight: 600;
+            font-size: 15px;
+            padding: 5px 0;
+            position: relative;
+        }
+
+        .nav-links a.active {
+            color: var(--primary-blue);
+        }
+        
+        .nav-links a.active::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            bottom: -5px;
+            width: 100%;
+            height: 2px;
+            background-color: var(--primary-blue);
+        }
+
+        .nav-icons {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .nav-icons i {
+            font-size: 18px;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+
+        .nav-icons .profile-pic {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid var(--primary-blue);
+        }
+
+        /* --- Main Content Area --- */
+        .main-content {
+            padding: 40px 0;
+        }
+
+        .page-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .page-header h1 {
+            font-size: 24px;
+            font-weight: 800;
+            margin-bottom: 0;
+        }
+
+        .page-header p {
+            font-size: 15px;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+
+        .page-header .back-icon {
+            font-size: 24px;
+            color: var(--text-dark);
+        }
+
+        .profile-layout {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 30px;
+            align-items: start;
+        }
+
+        /* --- Left Sidebar (Patient Info) --- */
+        .patient-info-card {
+            background-color: var(--bg-white);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+
+        .patient-avatar {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            object-fit: cover;
+            margin-bottom: 20px;
+            border: 3px solid var(--primary-blue);
+        }
+
+        .patient-info-card h2 {
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .patient-info-card p {
+            font-size: 14px;
+            color: var(--text-muted);
+            margin-bottom: 30px;
+        }
+
+        .basic-info {
+            width: 100%;
+            text-align: left;
+            margin-top: 20px;
+        }
+
+        .basic-info h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px dashed var(--border-color);
+        }
+
+        .info-row:last-of-type {
+            border-bottom: none;
+        }
+
+        .info-label {
+            font-weight: 500;
+            color: var(--text-dark);
+            width: 40%;
+        }
+
+        .info-value {
+            color: var(--text-muted);
+            text-align: right;
+            width: 60%;
+        }
+
+        .edit-profile-btn {
+            margin-top: 30px;
+            width: 100%;
+        }
+
+        /* --- Right Content Area (Appointments & Prescriptions) --- */
+        .profile-details {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        .card {
+            background-color: var(--bg-white);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+            padding: 30px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .card-header h2 {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .add-new-btn {
+            font-size: 14px;
+            color: var(--primary-blue);
+            font-weight: 600;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .add-new-btn i {
+            font-size: 12px;
+        }
+
+        /* --- Table Styles --- */
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 14px;
+            color: var(--text-dark);
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .data-table th {
+            font-weight: 600;
+            color: var(--text-muted);
+            background-color: var(--bg-white); /* Ensures header background is white */
+            text-transform: uppercase;
+            font-size: 12px;
+        }
+
+        .data-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .data-table .action-icon {
+            font-size: 16px;
+            color: var(--primary-blue);
+            cursor: pointer;
+        }
+
+        /* --- Download Report Button --- */
+        .download-report-card {
+            text-align: center;
+        }
+
+        .download-report-btn {
+            background-color: var(--download-green-bg);
+            color: var(--success-green);
+            border: 1px solid #86efac;
+            padding: 12px 25px;
+        }
+
+        .download-report-btn:hover {
+            background-color: #a7f3d0;
+            border-color: #4ade80;
+        }
+
+
+        /* --- Responsive adjustments --- */
+        @media (max-width: 992px) {
+            .profile-layout {
+                grid-template-columns: 1fr;
+            }
+            .navbar {
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 20px;
+            }
+            .nav-links {
+                order: 3; /* Move links below logo and icons */
+                width: 100%;
+                justify-content: center;
+            }
+            .nav-links a.active::after {
+                bottom: -10px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 15px;
+            }
+            .page-header h1 {
+                font-size: 20px;
+            }
+            .page-header p {
+                font-size: 14px;
+            }
+            .data-table th, .data-table td {
+                padding: 8px 10px;
+                font-size: 13px;
+            }
+            .data-table th:nth-child(2), .data-table td:nth-child(2), /* Doctor/Medication */
+            .data-table th:nth-child(4), .data-table td:nth-child(4), /* Diagnosis/Duration */
+            .data-table th:nth-child(5), .data-table td:nth-child(5) { /* Status/Prescribed By */
+                display: none; /* Hide some columns on smaller screens */
+            }
+            .info-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .info-label, .info-value {
+                width: 100%;
+                text-align: left;
+            }
+            .info-label {
+                margin-bottom: 5px;
+            }
+        }
     </style>
 </head>
+
 <body>
 
-    <header>
-        <div class="container nav-container">
-            <div class="logo">
-                <i class="fas fa-user-doctor"></i> MediLink
-            </div>
-            <nav>
-                <a href="login.php" class="login-link">Login</a>
-                <a href="signup.php" class="btn btn-primary">Sign Up</a>
-            </nav>
+<header>
+    <div class="container navbar">
+        <div class="logo">
+            <i class="fas fa-user-doctor"></i> MediLink
         </div>
-    </header>
+        <nav class="nav-links">
+            <a href="index.php" class="active">Dashboard</a>
+            <a href="appointments.php">Appointments</a>
+            <a href="prescriptions_history.php">Prescriptions</a>
+             <a href="edit_profile.php">Profile</a>
+             <a href="logout.php">Logout</a>
+        </nav>
 
-    <main>
-        <section class="hero-section">
-            <div class="container hero-container">
-                <div class="hero-content">
-                    <h1>Find the Right Doctor Fast</h1>
-                    <p>Connect with qualified healthcare professionals in your area. Book appointments instantly and get the care you need.</p>
+        <div class="nav-icons">
+          
+            <img src="https://ui-avatars.com/api/?name=<?php echo urlencode($patient['name']); ?>&background=random" class="profile-pic">
+        </div>
+    </div>
+</header>
 
-                    <div class="search-widget">
-                        <form action="search.php" method="GET">
-                            <div class="search-inputs-row">
-                                <div class="input-group">
-                                    <label for="doctor-name">Doctor</label>
-                                    <div class="input-wrapper icon-left">
-                                        <i class="fas fa-magnifying-glass"></i>
-                                        <input type="text" name="doctor" id="doctor-name" placeholder="Doctor name">
-                                    </div>
-                                </div>
-                                <div class="input-group">
-                                    <label for="specialty">Specialty</label>
-                                    <div class="input-wrapper select-wrapper">
-                                        <select name="specialty" id="specialty" style="padding-right: 40px;">
-                                            <option value="" selected>All Specialties</option>
-                                            <?php 
-                                            if($specialtiesResult->num_rows > 0){
-                                                while($spec = $specialtiesResult->fetch_assoc()){
-                                                    echo '<option value="'.htmlspecialchars($spec['specialization']).'">'.ucfirst(htmlspecialchars($spec['specialization'])).'</option>';
-                                                }
-                                            }
-                                            ?>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="input-group">
-                                    <label for="location">Location</label>
-                                    <div class="input-wrapper icon-right">
-                                        <input type="text" name="location" id="location" placeholder="Enter location">
-                                        <i class="fas fa-location-dot"></i>
-                                    </div>
-                                </div>
-                            </div>
-                            <button type="submit" class="btn btn-primary btn-block">
-                                <i class="fas fa-magnifying-glass" style="margin-right: 8px;"></i> Search Doctors
-                            </button>
-                        </form>
-                    </div>
-                </div>
-                <div class="hero-image">
-                    <img src="assets/img/hero.png" alt="Doctor consulting patient">
-                </div>
+
+<main class="main-content">
+    <div class="container">
+
+        <div class="page-header">
+
+            <div>
+                <h1>Patient Profile</h1>
+                <p>Complete medical history and patient information</p>
             </div>
-        </section>
+        </div>
 
-        <section class="section-bg-light">
-            <div class="container">
-                <div class="features-grid">
-                    <div class="feature-card">
-                        <div class="icon-circle icon-blue">
-                            <i class="far fa-calendar-check"></i>
-                        </div>
-                        <h3>Book Instantly</h3>
-                        <p class="text-muted">Schedule appointments with available doctors in real-time. No waiting, no hassle.</p>
-                    </div>
-                    <div class="feature-card">
-                        <div class="icon-circle icon-green">
-                            <i class="fas fa-video"></i>
-                        </div>
-                        <h3>Video Consult</h3>
-                        <p class="text-muted">Connect with doctors remotely through secure video consultations from anywhere.</p>
-                    </div>
-                    <div class="feature-card">
-                        <div class="icon-circle icon-purple">
-                            <i class="fas fa-shield-alt"></i>
-                        </div>
-                        <h3>Trusted Doctors</h3>
-                        <p class="text-muted">All our healthcare professionals are verified and highly qualified specialists.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
 
-        <section class="doctors-section">
-            <div class="container">
-                <div class="section-header text-center">
-                    <h2>Featured Doctors</h2>
-                    <p class="text-muted">Meet some of our top-rated healthcare professionals</p>
+        <div class="profile-layout">
+
+            <!-- LEFT PROFILE CARD -->
+            <div class="patient-info-card">
+                <img src="https://ui-avatars.com/api/?name=<?php echo urlencode($patient['name']); ?>&background=random" class="patient-avatar">
+
+                <h2><?php echo $patient['name']; ?></h2>
+                <p class="text-muted">Patient ID: #<?php echo $patient_id; ?></p>
+
+                <div class="basic-info">
+                    <h3>Basic Information</h3>
+
+                    <div class="info-row">
+                        <span class="info-label">Full Name</span>
+                        <span class="info-value"><?php echo $patient['name']; ?></span>
+                    </div>
+
+                    <div class="info-row">
+                        <span class="info-label">DOB</span>
+                        <span class="info-value"><?php echo $patient['date_of_birth']; ?></span>
+                    </div>
+
+                    <div class="info-row">
+                        <span class="info-label">Gender</span>
+                        <span class="info-value"><?php echo $patient['gender']; ?></span>
+                    </div>
+
+                    <div class="info-row">
+                        <span class="info-label">Phone</span>
+                        <span class="info-value"><?php echo $patient['phone']; ?></span>
+                    </div>
+
+                    <div class="info-row">
+                        <span class="info-label">Address</span>
+                        <span class="info-value"><?php echo $patient['address']; ?></span>
+                    </div>
                 </div>
-                <div class="doctors-grid">
-                    <?php if ($doctorsResult->num_rows > 0): ?>
-                        <?php while($doctor = $doctorsResult->fetch_assoc()): ?>
-                            <div class="doctor-card">
-                                <img src="https://ui-avatars.com/api/?name=<?php echo urlencode($doctor['full_name']); ?>&background=random" alt="<?php echo htmlspecialchars($doctor['full_name']); ?>" class="doctor-avatar">
-                                <h3>Dr. <?php echo htmlspecialchars($doctor['full_name']); ?></h3>
-                                <p class="doctor-specialty"><?php echo htmlspecialchars(ucfirst($doctor['specialization'])); ?></p>
-                                <div class="rating">
-                                    <?php 
-                                    $rating = round($doctor['avg_rating'] ?? 0, 1);
-                                    for ($i = 1; $i <= 5; $i++) {
-                                        if ($i <= $rating) {
-                                            echo '<i class="fas fa-star"></i>';
-                                        } elseif ($i - 0.5 <= $rating) {
-                                            echo '<i class="fas fa-star-half-stroke"></i>';
-                                        } else {
-                                            echo '<i class="far fa-star" style="color: #cbd5e1;"></i>';
-                                        }
-                                    }
-                                    ?>
-                                    <span><?php echo $rating > 0 ? $rating : 'No ratings'; ?> (<?php echo $doctor['review_count']; ?> reviews)</span>
-                                </div>
-                                <a href="login.php" class="btn btn-primary btn-block">Book Appointment</a>
-                            </div>
-                        <?php endwhile; ?>
-                    <?php else: ?>
-                        <div class="text-center" style="width: 100%;">
-                            <p class="text-muted">No featured doctors available at the moment.</p>
-                        </div>
-                    <?php endif; ?>
-                </div>
+
+                <a class="btn btn-primary edit-profile-btn" href="edit_profile.php?patient_id=<?php echo $patient_id; ?>">
+                    <i class="fas fa-edit"></i> Edit Profile
+    </a>
             </div>
-        </section>
-    </main>
+
+
+
+            <!-- RIGHT SIDE CONTENT -->
+            <div class="profile-details">
+
+                <!-- APPOINTMENTS -->
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Past Appointments</h2>
+                    </div>
+
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Doctor</th>
+                                <th>Status</th>
+                                <th>Mode</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+
+                        <tbody>
+                        <?php while ($row = $appointments->fetch_assoc()) { ?>
+                            <tr>
+                                <td><?php echo $row['appointment_date']; ?></td>
+                                <td><?php echo $row['doctor_name']; ?></td>
+                                <td><span class="status-badge status-completed"><?php echo $row['status']; ?></span></td>
+                                <td><?php echo $row['mode']; ?></td>
+                                <td><a href="view_appointment.php?id=<?php echo $row['appointment_id']; ?>"><i class="fas fa-eye action-icon"></i></a></td>
+                            </tr>
+                        <?php } ?>
+                        </tbody>
+                    </table>
+                </div>
+
+
+
+                <!-- PRESCRIPTIONS -->
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Prescriptions</h2>
+                    </div>
+
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Notes</th>
+                                <th>Doctor</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+
+                        <tbody>
+                        <?php while ($row = $prescriptions->fetch_assoc()) { ?>
+                            <tr>
+                                <td><?php echo $row['created_at']; ?></td>
+                                <td><?php echo $row['notes']; ?></td>
+                                <td><?php echo $row['doctor_name']; ?></td>
+                                <td><a href=" view_prescription.php?id=<?php echo htmlspecialchars($row['appointment_id']); ?>" ><i class="fas fa-eye action-icon"></i></a></td>
+                            </tr>
+                        <?php } ?>
+                        </tbody>
+                    </table>
+                </div>
+
+
+                <div class="card download-report-card">
+                    <button class="btn download-report-btn">
+                        <i class="fas fa-download"></i> Download PDF Report
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</main>
 
 </body>
 </html>
