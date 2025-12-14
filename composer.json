@@ -1,0 +1,11 @@
+{
+    "name": "utsho/dashboard",
+    "autoload": {
+        "psr-4": {
+            "Utsho\\Dashboard\\": "src/"
+        }
+    },
+    "require": {
+        "cboden/ratchet": "^0.4.4"
+    }
+}
